@@ -261,7 +261,8 @@ def collect_signals(target: str, category: str, timeout_sec: int = 12) -> Scrape
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
         page_text = soup.get_text(separator=" ", strip=True)
-        if len(page_text) < 200:
+        min_len = 80 if category_norm in non_social else 200
+        if len(page_text) < min_len:
             raise ScrapeError(f"Static fallback could not extract enough data from {url}")
 
         metrics = _build_metrics_from_page(page_text, target, category)
