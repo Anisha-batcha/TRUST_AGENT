@@ -1,0 +1,35 @@
+{
+  "base_score": 75,
+  "bounds": {
+    "min": 10,
+    "max": 99
+  },
+  "engagement": {
+    "very_low_threshold": 0.01,
+    "low_threshold": 0.03,
+    "very_high_threshold": 0.11,
+    "very_low_delta": -30,
+    "low_delta": -15,
+    "very_high_delta": -10
+  },
+  "age": {
+    "new_threshold": 30,
+    "young_threshold": 180,
+    "mature_threshold": 2000,
+    "new_delta": -30,
+    "young_delta": -15,
+    "mature_delta": 8
+  },
+  "review": {
+    "high_spike_threshold": 0.8,
+    "medium_spike_threshold": 0.6,
+    "high_spike_delta": -12,
+    "medium_spike_delta": -7
+  },
+  "profile": {
+    "critical_threshold": 0.5,
+    "low_threshold": 0.7,
+    "critical_delta": -12,
+    "low_delta": -6
+  }
+}

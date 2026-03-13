@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+pydantic
+groq
+requests
+selenium
+webdriver-manager
+celery
+redis
+beautifulsoup4
+scikit-learn
+numpy
+sentence-transformers
+chromadb
+transformers==4.45.2
+tokenizers==0.20.3
