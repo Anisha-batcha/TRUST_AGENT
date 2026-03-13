@@ -225,10 +225,39 @@ def collect_signals(target: str, category: str, timeout_sec: int = 12) -> Scrape
     options.add_argument("--lang=en-US")
     options.add_argument(f"--user-agent={choice(user_agents)}")
 
+    def _http_fetch() -> ScrapeResult:
+        import requests
+        from bs4 import BeautifulSoup
+
+        resp = requests.get(
+            url,
+            timeout=timeout_sec,
+            headers={"User-Agent": choice(user_agents)},
+        )
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        page_text = soup.get_text(separator=" ", strip=True)
+        if len(page_text) < 200:
+            raise ScrapeError(f"Static fallback could not extract enough data from {url}")
+
+        metrics = _build_metrics_from_page(page_text, target, category)
+        return ScrapeResult(metrics=metrics, source_url=url, mode="http_fallback", raw_text=page_text[:8000])
+
     driver = None
     try:
         last_error: Exception | None = None
-        prefer_selenium = mode == "selenium" or (mode == "auto" and category_norm not in non_social)
+
+        # For non-social targets, try HTTP first (fast, real data). For social targets, Selenium first is more reliable.
+        http_first = mode == "http" or (mode == "auto" and category_norm in non_social)
+        if http_first:
+            try:
+                return _http_fetch()
+            except Exception as exc:
+                last_error = exc
+                if mode == "http":
+                    raise ScrapeError(f"HTTP scraping failed: {exc}") from exc
+
+        prefer_selenium = mode == "selenium" or (mode == "auto" and not http_first)
         if prefer_selenium:
             attempts = 3
             env_attempts = os.getenv("TRUSTAGENT_SELENIUM_ATTEMPTS")
@@ -276,22 +305,7 @@ def collect_signals(target: str, category: str, timeout_sec: int = 12) -> Scrape
 
         # Fallback path: static HTTP fetch if Selenium is blocked.
         try:
-            import requests
-            from bs4 import BeautifulSoup
-
-            resp = requests.get(
-                url,
-                timeout=timeout_sec,
-                headers={"User-Agent": choice(user_agents)},
-            )
-            resp.raise_for_status()
-            soup = BeautifulSoup(resp.text, "html.parser")
-            page_text = soup.get_text(separator=" ", strip=True)
-            if len(page_text) < 200:
-                raise ScrapeError(f"Static fallback could not extract enough data from {url}")
-
-            metrics = _build_metrics_from_page(page_text, target, category)
-            return ScrapeResult(metrics=metrics, source_url=url, mode="http_fallback", raw_text=page_text[:8000])
+            return _http_fetch()
         except Exception as fallback_exc:
             if last_error is not None:
                 raise ScrapeError(f"Selenium scraping failed: {last_error}; static fallback failed: {fallback_exc}") from fallback_exc
