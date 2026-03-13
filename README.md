@@ -30,6 +30,8 @@ $env:TRUSTAGENT_STRICT_DATA="1"
 .\runvenv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8001 --reload
 ```
 
+Tip: Real scraping can be slower than synthetic mode. The React UI sets a higher timeout for investigations to avoid client-side timeouts.
+
 ### 2) Frontend (React/Vite)
 
 In a new terminal:

@@ -220,7 +220,7 @@ export default function DashboardPage() {
     setBusy(true);
     setError("");
     try {
-      const res = await api.post("/investigate", investigateInput);
+      const res = await api.post("/investigate", investigateInput, { timeout: 120000 });
       setInvestigation(res.data);
     } catch (err) {
       setError(err?.response?.data?.detail || "Investigation failed");

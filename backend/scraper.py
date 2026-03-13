@@ -187,6 +187,9 @@ def collect_signals(target: str, category: str, timeout_sec: int = 12) -> Scrape
     if mode in {"off", "disabled", "disable", "synthetic", "fallback"}:
         raise ScrapeError("Scraping disabled by TRUSTAGENT_SCRAPE_MODE")
 
+    category_norm = (category or "").strip().lower()
+    non_social = {"website", "startup", "freelancer", "mobile_app"}
+
     env_timeout = os.getenv("TRUSTAGENT_SCRAPE_TIMEOUT_SEC")
     if env_timeout:
         try:
@@ -225,7 +228,8 @@ def collect_signals(target: str, category: str, timeout_sec: int = 12) -> Scrape
     driver = None
     try:
         last_error: Exception | None = None
-        if mode in {"auto", "selenium"}:
+        prefer_selenium = mode == "selenium" or (mode == "auto" and category_norm not in non_social)
+        if prefer_selenium:
             attempts = 3
             env_attempts = os.getenv("TRUSTAGENT_SELENIUM_ATTEMPTS")
             if env_attempts:
