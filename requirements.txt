@@ -14,3 +14,4 @@ sentence-transformers
 chromadb
 transformers==4.45.2
 tokenizers==0.20.3
+truststore

@@ -12,6 +12,28 @@ class ScrapeError(RuntimeError):
     pass
 
 
+_TRUSTSTORE_INJECTED = False
+
+
+def _inject_truststore() -> None:
+    """
+    Prefer OS trust store on Windows/corporate networks.
+    This keeps HTTPS verification on, but uses system-installed CAs.
+    """
+    global _TRUSTSTORE_INJECTED
+    if _TRUSTSTORE_INJECTED:
+        return
+    try:
+        import truststore  # type: ignore
+
+        truststore.inject_into_ssl()
+    except Exception:
+        # Optional dependency / best-effort.
+        pass
+    finally:
+        _TRUSTSTORE_INJECTED = True
+
+
 @dataclass
 class ScrapeResult:
     metrics: dict[str, float]
@@ -186,6 +208,8 @@ def collect_signals(target: str, category: str, timeout_sec: int = 12) -> Scrape
     mode = (os.getenv("TRUSTAGENT_SCRAPE_MODE") or "auto").strip().lower()
     if mode in {"off", "disabled", "disable", "synthetic", "fallback"}:
         raise ScrapeError("Scraping disabled by TRUSTAGENT_SCRAPE_MODE")
+
+    _inject_truststore()
 
     category_norm = (category or "").strip().lower()
     non_social = {"website", "startup", "freelancer", "mobile_app"}
