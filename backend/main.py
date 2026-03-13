@@ -144,6 +144,10 @@ def _score_investigation(target: str, category: str, metrics: dict[str, float]) 
     rules = SCORING_RULES
     score = int(rules.get("base_score", 75))
 
+    category_norm = (category or "").strip().lower()
+    social_categories = {"instagram", "x", "linkedin", "youtube", "facebook", "telegram"}
+    is_social = category_norm in social_categories
+
     negatives: list[dict[str, Any]] = []
     positives: list[dict[str, Any]] = []
     evidence: list[dict[str, Any]] = []
@@ -185,18 +189,19 @@ def _score_investigation(target: str, category: str, metrics: dict[str, float]) 
             }
         )
 
-    eng = metrics["engagement_rate"]
-    eng_rules = rules["engagement"]
-    if eng < eng_rules["very_low_threshold"]:
-        add_negative("Engagement is critically low", eng_rules["very_low_delta"], "Interaction volume is abnormally low versus expected audience behavior.", "engagement_rate", eng, eng_rules["very_low_threshold"], "high")
-        red_flags.append("Potential inorganic audience or inactive followers")
-    elif eng < eng_rules["low_threshold"]:
-        add_negative("Engagement below baseline", eng_rules["low_delta"], "Engagement is below common trust baseline for active entities.", "engagement_rate", eng, eng_rules["low_threshold"], "medium")
-    elif eng > eng_rules["very_high_threshold"]:
-        add_negative("Engagement spike is suspicious", eng_rules["very_high_delta"], "Very high engagement can indicate purchased interactions when unsupported by account maturity.", "engagement_rate", eng, eng_rules["very_high_threshold"], "medium")
-        red_flags.append("Abnormal engagement pattern detected")
-    else:
-        add_positive("Engagement is healthy", 6, "Engagement sits in a normal operating range.", "engagement_rate", eng, eng_rules["low_threshold"], "medium")
+    if is_social:
+        eng = metrics["engagement_rate"]
+        eng_rules = rules["engagement"]
+        if eng < eng_rules["very_low_threshold"]:
+            add_negative("Engagement is critically low", eng_rules["very_low_delta"], "Interaction volume is abnormally low versus expected audience behavior.", "engagement_rate", eng, eng_rules["very_low_threshold"], "high")
+            red_flags.append("Potential inorganic audience or inactive followers")
+        elif eng < eng_rules["low_threshold"]:
+            add_negative("Engagement below baseline", eng_rules["low_delta"], "Engagement is below common trust baseline for active entities.", "engagement_rate", eng, eng_rules["low_threshold"], "medium")
+        elif eng > eng_rules["very_high_threshold"]:
+            add_negative("Engagement spike is suspicious", eng_rules["very_high_delta"], "Very high engagement can indicate purchased interactions when unsupported by account maturity.", "engagement_rate", eng, eng_rules["very_high_threshold"], "medium")
+            red_flags.append("Abnormal engagement pattern detected")
+        else:
+            add_positive("Engagement is healthy", 6, "Engagement sits in a normal operating range.", "engagement_rate", eng, eng_rules["low_threshold"], "medium")
 
     age_days = metrics["account_age_days"]
     age_rules = rules["age"]
@@ -234,12 +239,13 @@ def _score_investigation(target: str, category: str, metrics: dict[str, float]) 
     elif sentiment > 0.75:
         add_positive("Positive sentiment baseline", 6, "Sentiment trend is consistently positive.", "sentiment_score", sentiment, 0.75, "medium")
 
-    growth_consistency = metrics["follower_growth_consistency"]
-    if growth_consistency < 0.3:
-        add_negative("Follower growth inconsistency", -9, "Growth behavior shows unstable velocity, a common manipulation signal.", "follower_growth_consistency", growth_consistency, 0.3, "medium")
-        red_flags.append("Inconsistent follower growth")
-    elif growth_consistency > 0.8:
-        add_positive("Stable growth pattern", 4, "Follower growth trend appears consistent over time.", "follower_growth_consistency", growth_consistency, 0.8, "medium")
+    if is_social:
+        growth_consistency = metrics["follower_growth_consistency"]
+        if growth_consistency < 0.3:
+            add_negative("Follower growth inconsistency", -9, "Growth behavior shows unstable velocity, a common manipulation signal.", "follower_growth_consistency", growth_consistency, 0.3, "medium")
+            red_flags.append("Inconsistent follower growth")
+        elif growth_consistency > 0.8:
+            add_positive("Stable growth pattern", 4, "Follower growth trend appears consistent over time.", "follower_growth_consistency", growth_consistency, 0.8, "medium")
 
     bounds = rules["bounds"]
     score = max(int(bounds["min"]), min(int(bounds["max"]), int(round(score))))
@@ -442,6 +448,14 @@ def _build_investigation_result(target: str, category: str, persist: bool = True
         score_fn=_score_investigation,
         fallback_metrics_fn=_generate_metrics,
     )
+
+    strict_data = (os.getenv("TRUSTAGENT_STRICT_DATA") or "").strip().lower() in {"1", "true", "yes", "on"}
+    collector_mode = str(pipeline_result.pipeline.get("collector", {}).get("mode") or "")
+    if strict_data and collector_mode == "fallback":
+        raise HTTPException(
+            status_code=503,
+            detail="Insufficient live data for accurate scoring (scraping failed and synthetic fallback is disabled in strict mode).",
+        )
 
     metrics = pipeline_result.metrics
     scored = pipeline_result.scored

@@ -24,6 +24,12 @@ $env:TRUSTAGENT_SCRAPE_TIMEOUT_SEC="6"
 .\runvenv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8001 --reload
 ```
 
+Strict accuracy mode (no synthetic fallback scoring):
+```powershell
+$env:TRUSTAGENT_STRICT_DATA="1"
+.\runvenv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8001 --reload
+```
+
 ### 2) Frontend (React/Vite)
 
 In a new terminal:
@@ -47,4 +53,3 @@ This project seeds a dev admin user in SQLite on first run:
 
 - The React dev proxy defaults to backend `http://127.0.0.1:8001` (change via `VITE_BACKEND_URL` if needed).
 - Data is persisted in `backend/data/trustagent.db` (ignored by git).
-
