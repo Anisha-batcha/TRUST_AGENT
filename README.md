@@ -32,6 +32,8 @@ $env:TRUSTAGENT_STRICT_DATA="1"
 
 Tip: Real scraping can be slower than synthetic mode. The React UI sets a higher timeout for investigations to avoid client-side timeouts.
 
+If you are on a corporate network (MITM proxy), HTTPS verification may fail in Python `requests`. This repo includes `truststore` to use the OS trust store automatically.
+
 ### 2) Frontend (React/Vite)
 
 In a new terminal:
