@@ -52,10 +52,21 @@ def _hash_proxy_seed(text: str) -> float:
 
 def _extract_numeric_near(text: str, keyword: str) -> float | None:
     # Capture values like 2,345 / 12.4K / 1.1M around the keyword.
-    pattern = rf"([0-9][0-9,]*(?:\.[0-9]+)?\s*[kKmM]?)\s+{re.escape(keyword)}"
-    m = re.search(pattern, text)
+    # Common layouts:
+    #   "12.4K followers"
+    #   "followers: 12.4K"
+    patterns = [
+        rf"([0-9][0-9,]*(?:\.[0-9]+)?\s*[kKmM]?)\s+{re.escape(keyword)}",
+        rf"{re.escape(keyword)}\s*[:\-]?\s*([0-9][0-9,]*(?:\.[0-9]+)?\s*[kKmM]?)",
+    ]
+    m = None
+    for pat in patterns:
+        m = re.search(pat, text)
+        if m:
+            break
     if not m:
         return None
+
     raw = m.group(1).replace(",", "").strip().lower()
     mult = 1.0
     if raw.endswith("k"):
@@ -72,6 +83,68 @@ def _extract_numeric_near(text: str, keyword: str) -> float | None:
 
 def _build_metrics_from_page(page_text: str, target: str, category: str) -> dict[str, float]:
     text = re.sub(r"\s+", " ", page_text).lower()
+    category_norm = (category or "").strip().lower()
+
+    def _contains_any(needles: list[str]) -> bool:
+        return any(n in text for n in needles)
+
+    def _count_any(needles: list[str]) -> int:
+        return sum(text.count(n) for n in needles)
+
+    # Category-aware heuristic extraction: social vs non-social targets.
+    non_social = {"website", "startup", "freelancer", "mobile_app"}
+    if category_norm in non_social:
+        # Website/startup-like pages: derive trust signals from content density + policy/contact presence.
+        seed = _hash_proxy_seed(f"{target}|{category}|{len(text)}")
+        text_density = min(1.0, len(text) / 9000)
+
+        has_contact = _contains_any(["contact", "support@", "help@", "customer support", "phone", "email", "address"])
+        has_about = _contains_any(["about", "our story", "company", "team", "mission"])
+        has_policy = _contains_any(["privacy", "terms", "refund", "returns", "shipping", "cookie"])
+        has_https = target.strip().lower().startswith("https://") or "https" in text[:500]
+
+        pos_hits = _count_any(["trusted", "secure", "verified", "official", "authentic"])
+        neg_hits = _count_any(["scam", "fraud", "complaint", "chargeback", "fake", "phishing"])
+        sentiment = 0.52 + (text_density * 0.18) + ((pos_hits - neg_hits) * 0.02)
+
+        profile_completeness = 0.45 + (0.15 if has_contact else 0) + (0.12 if has_about else 0) + (0.12 if has_policy else 0)
+        if has_https:
+            profile_completeness += 0.04
+        profile_completeness = min(0.98, max(0.35, profile_completeness))
+
+        # Review spike: treat "reviews/testimonials" mention with low content as suspicious.
+        reviews = _extract_numeric_near(text, "reviews")
+        rating = _extract_numeric_near(text, "rating")
+        review_mention = _contains_any(["reviews", "testimonials", "ratings"])
+        reviews = reviews if reviews is not None else (10 + seed * 420)
+        rating = rating if rating is not None else (3.2 + seed * 1.5)
+        rating = min(5.0, max(1.0, float(rating)))
+
+        review_spike_ratio = 0.12 + (0.2 if review_mention and text_density < 0.25 and reviews > 120 else 0.0)
+        review_spike_ratio += (0.08 if "limited time" in text or "hurry" in text else 0.0)
+        review_spike_ratio = min(0.95, max(0.05, review_spike_ratio))
+
+        # Engagement is not social-like here; use a stable proxy.
+        engagement_rate = 0.01 + (0.09 * text_density) - (0.03 * review_spike_ratio)
+        engagement_rate = min(0.18, max(0.004, engagement_rate))
+
+        # Age proxy: more content tends to correlate with maturity (demo-safe).
+        account_age_days = int(60 + (text_density * 3200) + (seed * 900))
+
+        follower_growth_consistency = 0.42 + (0.45 * text_density) - (0.12 * review_spike_ratio)
+        follower_growth_consistency = min(0.99, max(0.12, follower_growth_consistency))
+
+        sentiment_score = min(0.92, max(0.18, sentiment))
+
+        return {
+            "engagement_rate": round(float(engagement_rate), 4),
+            "review_spike_ratio": round(float(review_spike_ratio), 3),
+            "profile_completeness": round(float(profile_completeness), 3),
+            "account_age_days": int(account_age_days),
+            "sentiment_score": round(float(sentiment_score), 3),
+            "follower_growth_consistency": round(float(follower_growth_consistency), 3),
+        }
+
     followers = _extract_numeric_near(text, "followers")
     following = _extract_numeric_near(text, "following")
     likes = _extract_numeric_near(text, "likes")
