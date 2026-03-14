@@ -1,0 +1,13 @@
+# Optional dependencies for enhanced features.
+# Note: Some of these may not have wheels for Python 3.13 on Windows.
+# If installs fail, consider using Python 3.11.
+groq
+selenium
+webdriver-manager
+celery
+redis
+scikit-learn
+chromadb
+sentence-transformers
+transformers
+tokenizers

@@ -49,7 +49,7 @@ export default function AuthPage() {
         className="card auth-card"
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.7 }}
+        transition={{ duration: 0.4, ease: "easeOut" }}
       >
         <div className="switch-tabs">
           <button className={mode === "login" ? "tab active" : "tab"} onClick={() => setMode("login")}>Login</button>

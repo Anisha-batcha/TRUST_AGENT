@@ -4,9 +4,11 @@ import json
 import os
 import re
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +19,10 @@ try:
     from backend.ai.groq_client import generate_report_details
 except ModuleNotFoundError:
     from ai.groq_client import generate_report_details
+try:
+    from backend.scam_patterns import detect_scam_patterns
+except ModuleNotFoundError:
+    from scam_patterns import detect_scam_patterns
 try:
     from backend.agents import run_agent_pipeline
 except ModuleNotFoundError:
@@ -40,8 +46,21 @@ except ModuleNotFoundError:
 
 
 BASE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = BASE_DIR.parent
 DB_PATH = BASE_DIR / "data" / "trustagent.db"
 RULES_PATH = BASE_DIR / "config" / "scoring_rules.json"
+
+# Ensure local pip --target dependencies are importable even when the backend
+# is started without the provided PowerShell scripts.
+# NOTE: We intentionally avoid the legacy `.deps-backend` folder because it can
+# contain partial/broken installs from earlier runs.
+for rel in (".deps-backend-v2", ".deps-ai", ".deps-scrape"):
+    candidate = (REPO_ROOT / rel).resolve()
+    if candidate.exists() and str(candidate) not in sys.path:
+        sys.path.insert(0, str(candidate))
+
+# Ensure SQLite parent directory exists so first run works.
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 with RULES_PATH.open("r", encoding="utf-8") as fh:
     SCORING_RULES = json.load(fh)
@@ -61,6 +80,12 @@ class CompareRequest(BaseModel):
     left: CompareTarget
     right: CompareTarget
     persist: bool = True
+
+
+class FeedbackRequest(BaseModel):
+    scan_id: int = Field(ge=1)
+    label: str = Field(min_length=2)
+    notes: str | None = None
 
 
 class AuthRequest(BaseModel):
@@ -109,6 +134,41 @@ def _normalize_target(target: str) -> str:
     return cleaned.strip("/")
 
 
+def _infer_category_from_target(target: str) -> str | None:
+    t = target.strip().lower()
+    if t.startswith("http://") or t.startswith("https://"):
+        parsed = urlparse(t)
+        host = (parsed.netloc or "").lower()
+        # Remove credentials/port if present.
+        if "@" in host:
+            host = host.split("@", 1)[-1]
+        if ":" in host:
+            host = host.split(":", 1)[0]
+        if host.startswith("www."):
+            host = host[4:]
+
+        host_map = {
+            "instagram.com": "instagram",
+            "x.com": "x",
+            "twitter.com": "x",
+            "linkedin.com": "linkedin",
+            "youtube.com": "youtube",
+            "youtu.be": "youtube",
+            "facebook.com": "facebook",
+            "t.me": "telegram",
+            "telegram.me": "telegram",
+        }
+        for domain, cat in host_map.items():
+            if host == domain or host.endswith(f".{domain}"):
+                return cat
+        return "website"
+
+    # Non-URL inputs with a dot are likely a website/domain.
+    if "." in t and " " not in t and "/" not in t:
+        return "website"
+    return None
+
+
 def _hash_bucket(text: str, salt: str) -> float:
     import hashlib
 
@@ -142,7 +202,8 @@ def _risk_level(score: int) -> str:
 
 def _score_investigation(target: str, category: str, metrics: dict[str, float]) -> dict[str, Any]:
     rules = SCORING_RULES
-    score = int(rules.get("base_score", 75))
+    base_score = int(rules.get("base_score", 75))
+    score = base_score
 
     category_norm = (category or "").strip().lower()
     social_categories = {"instagram", "x", "linkedin", "youtube", "facebook", "telegram"}
@@ -156,10 +217,22 @@ def _score_investigation(target: str, category: str, metrics: dict[str, float]) 
     def add_negative(factor: str, delta: int, reason: str, signal: str, value: float | int, threshold: float | int, confidence: str = "medium") -> None:
         nonlocal score
         score += delta
-        negatives.append({"factor": factor, "delta": delta, "reason": reason, "source": "rules.v1", "confidence": confidence})
+        negatives.append(
+            {
+                "factor": factor,
+                "delta": delta,
+                "reason": reason,
+                "signal": signal,
+                "value": value,
+                "threshold": threshold,
+                "source": "rules.v1",
+                "confidence": confidence,
+            }
+        )
         evidence.append(
             {
                 "factor": factor,
+                "delta": delta,
                 "reason": reason,
                 "signal": signal,
                 "value": value,
@@ -174,10 +247,22 @@ def _score_investigation(target: str, category: str, metrics: dict[str, float]) 
     def add_positive(factor: str, delta: int, reason: str, signal: str, value: float | int, threshold: float | int, confidence: str = "medium") -> None:
         nonlocal score
         score += delta
-        positives.append({"factor": factor, "delta": delta, "reason": reason, "source": "rules.v1", "confidence": confidence})
+        positives.append(
+            {
+                "factor": factor,
+                "delta": delta,
+                "reason": reason,
+                "signal": signal,
+                "value": value,
+                "threshold": threshold,
+                "source": "rules.v1",
+                "confidence": confidence,
+            }
+        )
         evidence.append(
             {
                 "factor": factor,
+                "delta": delta,
                 "reason": reason,
                 "signal": signal,
                 "value": value,
@@ -248,12 +333,33 @@ def _score_investigation(target: str, category: str, metrics: dict[str, float]) 
             add_positive("Stable growth pattern", 4, "Follower growth trend appears consistent over time.", "follower_growth_consistency", growth_consistency, 0.8, "medium")
 
     bounds = rules["bounds"]
+    score_raw = int(round(score))
     score = max(int(bounds["min"]), min(int(bounds["max"]), int(round(score))))
     data_state = "sufficient_data" if len(evidence) >= 4 else "limited_data"
     confidence_score = max(0.25, min(0.98, 0.45 + (len(evidence) * 0.06) - (0.05 * len(red_flags))))
 
     negatives_sorted = sorted(negatives, key=lambda x: x["delta"])[:3]
     positives_sorted = sorted(positives, key=lambda x: x["delta"], reverse=True)[:3]
+
+    contributions = sorted([*positives, *negatives], key=lambda x: abs(int(x.get("delta", 0))), reverse=True)
+    expected_signals = [
+        "engagement_rate",
+        "review_spike_ratio",
+        "profile_completeness",
+        "account_age_days",
+        "sentiment_score",
+        "follower_growth_consistency",
+    ]
+    missing_signals = [s for s in expected_signals if s not in metrics]
+    present_signals = [s for s in expected_signals if s in metrics]
+    coverage = round((len(present_signals) / max(1, len(expected_signals))) * 100.0, 1)
+
+    confidence_counts = {"high": 0, "medium": 0, "low": 0}
+    for item in contributions:
+        band = str(item.get("confidence", "medium")).lower()
+        if band not in confidence_counts:
+            band = "medium"
+        confidence_counts[band] += 1
 
     return {
         "score": score,
@@ -263,6 +369,19 @@ def _score_investigation(target: str, category: str, metrics: dict[str, float]) 
         "evidence": evidence,
         "confidence_score": round(confidence_score, 3),
         "data_state": data_state,
+        "xai": {
+            "base_score": base_score,
+            "rules_score_raw": score_raw,
+            "rules_score": score,
+            "was_clamped": score_raw != score,
+            "clamp_min": int(bounds["min"]),
+            "clamp_max": int(bounds["max"]),
+            "signal_coverage_percent": coverage,
+            "signals_present": present_signals,
+            "signals_missing": missing_signals,
+            "contributions": contributions,
+            "confidence_counts": confidence_counts,
+        },
     }
 
 
@@ -309,6 +428,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             "ai_meta_json": "TEXT",
             "agent_pipeline_json": "TEXT",
             "vector_doc_id": "TEXT",
+            "scam_patterns_json": "TEXT",
         },
     )
 
@@ -322,6 +442,31 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL
         )
         """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            scan_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            label TEXT NOT NULL,
+            notes TEXT,
+            target TEXT,
+            target_normalized TEXT,
+            category TEXT
+        )
+        """
+    )
+    _ensure_table_columns(
+        conn,
+        "feedback",
+        {
+            "target": "TEXT",
+            "target_normalized": "TEXT",
+            "category": "TEXT",
+        },
     )
     conn.commit()
 
@@ -368,6 +513,7 @@ def _row_to_investigation(row: sqlite3.Row) -> dict[str, Any]:
         "data_state": _row_get(row, "data_state") or "sufficient_data",
         "agent_pipeline": json.loads(_row_get(row, "agent_pipeline_json") or "{}"),
         "ai_meta": json.loads(_row_get(row, "ai_meta_json") or "{}"),
+        "scam_patterns": json.loads(_row_get(row, "scam_patterns_json") or "[]"),
         "vector_doc_id": _row_get(row, "vector_doc_id"),
     }
 
@@ -387,6 +533,26 @@ def _load_training_rows(limit: int = 400) -> list[dict[str, Any]]:
     return out
 
 
+def _feedback_stats(target_normalized: str, category: str) -> dict[str, Any]:
+    label_counts = {"legit": 0, "scam": 0, "unknown": 0}
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT label, COUNT(*) AS c
+            FROM feedback
+            WHERE target_normalized = ? AND category = ?
+            GROUP BY label
+            """,
+            (target_normalized, category.strip().lower()),
+        ).fetchall()
+    for r in rows:
+        label = str(r["label"] or "").strip().lower()
+        if label in label_counts:
+            label_counts[label] = int(r["c"] or 0)
+    total = sum(label_counts.values())
+    return {"target_normalized": target_normalized, "category": category.strip().lower(), "total": total, **label_counts}
+
+
 def _persist_investigation(payload: dict[str, Any]) -> int:
     with _connect() as conn:
         cursor = conn.execute(
@@ -395,8 +561,9 @@ def _persist_investigation(payload: dict[str, Any]) -> int:
                 created_at, target, category, trust_score, risk_level,
                 red_flags_json, metrics_json, factors_json, evidence_json,
                 report_text, target_normalized, confidence_score, data_state,
-                ml_score, ai_meta_json, agent_pipeline_json, vector_doc_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ml_score, ai_meta_json, agent_pipeline_json, vector_doc_id,
+                scam_patterns_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payload["created_at"],
@@ -416,6 +583,7 @@ def _persist_investigation(payload: dict[str, Any]) -> int:
                 json.dumps(payload.get("ai_meta", {})),
                 json.dumps(payload.get("agent_pipeline", {})),
                 payload.get("vector_doc_id"),
+                json.dumps(payload.get("scam_patterns", [])),
             ),
         )
         conn.commit()
@@ -434,17 +602,24 @@ def _build_context_text(target: str, category: str, metrics: dict[str, float], e
 
 def _build_investigation_result(target: str, category: str, persist: bool = True) -> dict[str, Any]:
     target_clean = target.strip()
-    category_clean = category.strip().lower()
+    requested_category = category.strip().lower()
 
     if not target_clean:
         raise HTTPException(status_code=400, detail="target is required")
-    if not category_clean:
+    if not requested_category:
         raise HTTPException(status_code=400, detail="category is required")
+
+    inferred = _infer_category_from_target(target_clean)
+    effective_category = requested_category
+    category_warning: str | None = None
+    if inferred and inferred != requested_category:
+        effective_category = inferred
+        category_warning = f"Category mismatch for target URL; using '{effective_category}' instead of '{requested_category}'."
 
     created_at = utc_now_iso()
     pipeline_result = run_agent_pipeline(
         target=target_clean,
-        category=category_clean,
+        category=effective_category,
         score_fn=_score_investigation,
         fallback_metrics_fn=_generate_metrics,
     )
@@ -459,10 +634,12 @@ def _build_investigation_result(target: str, category: str, persist: bool = True
 
     metrics = pipeline_result.metrics
     scored = pipeline_result.scored
+    scam_patterns = detect_scam_patterns(pipeline_result.context_text or "", target_clean, effective_category)
 
     training_rows = _load_training_rows()
     ml_score, ml_meta = trust_model.predict(metrics, rule_score=int(scored["score"]), training_rows=training_rows)
 
+    rule_score = int(scored["score"])
     blended_score = int(round((0.7 * int(scored["score"])) + (0.3 * ml_score)))
     scored["score"] = max(10, min(99, blended_score))
     scored["risk_level"] = _risk_level(scored["score"])
@@ -476,9 +653,72 @@ def _build_investigation_result(target: str, category: str, persist: bool = True
         }
     )
 
+    xai = dict(scored.get("xai") or {})
+    if xai:
+        xai["ml_score"] = ml_score
+        xai["final_score"] = scored["score"]
+        xai["blend_weights"] = {"rules": 0.7, "ml": 0.3}
+        xai.setdefault("contributions", [])
+        xai["contributions"] = [
+            {
+                "factor": "ML calibration blend",
+                "delta": int(scored["score"] - rule_score),
+                "reason": "Final score is blended from rules + RandomForest ML model.",
+                "signal": "ml_blend",
+                "value": ml_score,
+                "threshold": rule_score,
+                "source": "ml.random_forest.v1",
+                "confidence": "medium",
+            },
+            *list(xai["contributions"]),
+        ]
+        scored["xai"] = xai
+
+    target_normalized = _normalize_target(target_clean)
+    feedback_meta = _feedback_stats(target_normalized, effective_category)
+    feedback_adjustment = 0
+    if (os.getenv("TRUSTAGENT_FEEDBACK_CALIBRATE") or "1").strip().lower() not in {"0", "false", "no"}:
+        total_fb = int(feedback_meta.get("total") or 0)
+        if total_fb >= 3:
+            legit = int(feedback_meta.get("legit") or 0)
+            scam = int(feedback_meta.get("scam") or 0)
+            delta = int(round(((legit - scam) / max(1, total_fb)) * 12))
+            if delta:
+                feedback_adjustment = delta
+                scored["score"] = max(10, min(99, int(scored["score"]) + delta))
+                scored["risk_level"] = _risk_level(scored["score"])
+                # Confidence boost when the community agrees strongly; otherwise slight penalty.
+                agreement = max(legit, scam) / max(1, total_fb)
+                if agreement >= 0.8:
+                    scored["confidence_score"] = round(min(0.98, float(scored["confidence_score"]) + 0.05), 3)
+                elif agreement <= 0.6:
+                    scored["confidence_score"] = round(max(0.25, float(scored["confidence_score"]) - 0.03), 3)
+
+                xai = dict(scored.get("xai") or {})
+                if xai:
+                    xai["final_score"] = scored["score"]
+                    xai.setdefault("contributions", [])
+                    xai["contributions"] = [
+                        {
+                            "factor": "Community feedback calibration",
+                            "delta": delta,
+                            "reason": f"{legit} legit vs {scam} scam labels out of {total_fb} feedback marks for this target.",
+                            "signal": "feedback_loop",
+                            "value": legit,
+                            "threshold": scam,
+                            "source": "feedback.loop.v1",
+                            "confidence": "medium" if total_fb < 10 else "high",
+                        },
+                        *list(xai["contributions"]),
+                    ]
+                    scored["xai"] = xai
+
+    feedback_meta["applied_delta"] = feedback_adjustment
+    feedback_meta["enabled"] = (os.getenv("TRUSTAGENT_FEEDBACK_CALIBRATE") or "1").strip().lower() not in {"0", "false", "no"}
+
     context_text = _build_context_text(
         target_clean,
-        category_clean,
+        effective_category,
         metrics,
         scored["evidence"],
         pipeline_result.context_text,
@@ -498,8 +738,10 @@ def _build_investigation_result(target: str, category: str, persist: bool = True
         "created_at": created_at,
         "last_verified_at": created_at,
         "target": target_clean,
-        "target_normalized": _normalize_target(target_clean),
-        "category": category_clean,
+        "target_normalized": target_normalized,
+        "category": effective_category,
+        "requested_category": requested_category,
+        "category_warning": category_warning,
         "trust_score": scored["score"],
         "ml_score": ml_score,
         "risk_level": scored["risk_level"],
@@ -507,6 +749,9 @@ def _build_investigation_result(target: str, category: str, persist: bool = True
         "metrics": metrics,
         "why_score": scored["factors"],
         "evidence": scored["evidence"],
+        "xai": scored.get("xai"),
+        "scam_patterns": scam_patterns,
+        "feedback_meta": feedback_meta,
         "investigation_report": report,
         "confidence_score": scored["confidence_score"],
         "data_state": scored["data_state"],
@@ -529,7 +774,7 @@ def _build_investigation_result(target: str, category: str, persist: bool = True
         context_text,
         {
             "target": target_clean,
-            "category": category_clean,
+            "category": effective_category,
             "trust_score": result["trust_score"],
             "risk_level": result["risk_level"],
             "created_at": created_at,
@@ -734,6 +979,74 @@ def analytics(limit: int = Query(default=10, ge=1, le=100), _: dict[str, Any] = 
     ]
 
     return {"top_risky_targets": top_risky_targets, "category_trends": category_trends}
+
+
+def _persist_feedback(username: str, payload: FeedbackRequest) -> dict[str, Any]:
+    label = payload.label.strip().lower()
+    if label not in {"legit", "scam", "unknown"}:
+        raise HTTPException(status_code=400, detail="label must be one of: legit, scam, unknown")
+
+    with _connect() as conn:
+        row = conn.execute("SELECT id, target, category, target_normalized FROM investigations WHERE id = ?", (payload.scan_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Investigation not found")
+
+        created_at = utc_now_iso()
+        conn.execute(
+            """
+            INSERT INTO feedback (created_at, scan_id, username, label, notes, target, target_normalized, category)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                created_at,
+                int(payload.scan_id),
+                username,
+                label,
+                (payload.notes or "").strip() or None,
+                row["target"],
+                (row["target_normalized"] or _normalize_target(row["target"])),
+                row["category"],
+            ),
+        )
+        conn.commit()
+
+    return {
+        "created_at": created_at,
+        "scan_id": int(payload.scan_id),
+        "username": username,
+        "label": label,
+        "notes": (payload.notes or "").strip() or None,
+    }
+
+
+@app.post("/feedback")
+def submit_feedback(payload: FeedbackRequest, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    return _persist_feedback(user["username"], payload)
+
+
+@app.get("/feedback")
+def list_feedback(limit: int = Query(default=50, ge=1, le=500), _: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, created_at, scan_id, username, label, notes, target, target_normalized, category FROM feedback ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    items = [
+        {
+            "id": r["id"],
+            "created_at": r["created_at"],
+            "scan_id": r["scan_id"],
+            "username": r["username"],
+            "label": r["label"],
+            "notes": r["notes"],
+            "target": r["target"],
+            "target_normalized": _row_get(r, "target_normalized"),
+            "category": r["category"],
+        }
+        for r in rows
+    ]
+    return {"count": len(items), "items": items}
 
 
 @app.post("/context/search")

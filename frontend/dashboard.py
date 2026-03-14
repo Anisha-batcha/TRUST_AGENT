@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -7,7 +8,7 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
-API_BASE_URL = "http://localhost:8000"
+API_BASE_URL = (os.getenv("TRUSTAGENT_API_BASE_URL") or "http://127.0.0.1:8001").rstrip("/")
 
 CATEGORY_LABELS = {
     "Instagram": "instagram",

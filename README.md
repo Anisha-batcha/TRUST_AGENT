@@ -1,59 +1,64 @@
 # TrustAgent
 
-TrustAgent is an explainable digital trust scoring system (FastAPI backend + React frontend) that takes a target URL/handle + category and returns a trust score, risk level, red flags, evidence, and confidence.
+TrustAgent is an explainable digital trust scoring system (FastAPI backend + React frontend). It takes a target URL/handle + category and returns a trust score, risk level, red flags, evidence, confidence, and XAI breakdown.
 
-## Quick Start (React)
+## Quick Start (Recommended)
 
-### 1) Backend (FastAPI)
+1) Create `.env`
 
-From repo root:
+- Copy `.env.example` → `.env`
+- (Optional) set `GROQ_API_KEY` and `SERPER_API_KEY`
+
+2) Start backend (FastAPI)
 
 ```powershell
-python -m venv runvenv
-.\runvenv\Scripts\python.exe -m pip install -r requirements.txt
-.\runvenv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8001 --reload
+.\run_backend.ps1
 ```
 
-Open health check:
-- `http://127.0.0.1:8001/`
+Open:
+- `http://127.0.0.1:8001/` (health)
+- `http://127.0.0.1:8001/docs` (Swagger)
 
-Optional (faster demo mode; avoids Selenium):
-```powershell
-$env:TRUSTAGENT_SCRAPE_MODE="http"
-$env:TRUSTAGENT_SCRAPE_TIMEOUT_SEC="6"
-.\runvenv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8001 --reload
-```
-
-Strict accuracy mode (no synthetic fallback scoring):
-```powershell
-$env:TRUSTAGENT_STRICT_DATA="1"
-.\runvenv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8001 --reload
-```
-
-Tip: Real scraping can be slower than synthetic mode. The React UI sets a higher timeout for investigations to avoid client-side timeouts.
-
-If you are on a corporate network (MITM proxy), HTTPS verification may fail in Python `requests`. This repo includes `truststore` to use the OS trust store automatically.
-
-### 2) Frontend (React/Vite)
-
-In a new terminal:
+3) Start frontend (React/Vite)
 
 ```powershell
-cd frontend-react
-npm install
-npm run dev -- --host 127.0.0.1 --port 5173
+.\run_frontend.ps1
 ```
 
 Open:
 - `http://127.0.0.1:5173/`
 
-## Default Demo Login
+### Default demo login
 
-This project seeds a dev admin user in SQLite on first run:
 - Username: `admin`
 - Password: `admin123`
 
-## Notes
+## Scraping modes
 
-- The React dev proxy defaults to backend `http://127.0.0.1:8001` (change via `VITE_BACKEND_URL` if needed).
-- Data is persisted in `backend/data/trustagent.db` (ignored by git).
+Configure in `.env`:
+
+- `TRUSTAGENT_SCRAPE_MODE=auto` (default): Selenium when possible, otherwise HTTP fallback.
+- `TRUSTAGENT_SCRAPE_MODE=selenium`: Try Selenium first.
+- `TRUSTAGENT_SCRAPE_STRICT=1`: “Real scraping only” — if Selenium is blocked/login/captcha, the request fails (no fallback).
+
+Selenium dependency install:
+
+- Manual:
+  - `python -m pip install --upgrade --target .deps-scrape -r requirements-scrape.txt`
+- Auto-install once:
+  - set `TRUSTAGENT_SELENIUM_INSTALL=1` and restart backend.
+
+## Optional: Streamlit dashboard
+
+```powershell
+.\run_dashboard.ps1
+```
+
+## Dependency files
+
+- Backend: `requirements.txt` (installs into `.deps-backend-v2`)
+- Groq (optional): `requirements-ai.txt` (installs into `.deps-ai`)
+- Selenium (optional): `requirements-scrape.txt` (installs into `.deps-scrape`)
+- Streamlit UI: `requirements-ui.txt`
+- Extras: `requirements-optional.txt`
+

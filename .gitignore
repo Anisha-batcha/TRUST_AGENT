@@ -13,6 +13,16 @@ venv/
 .venv/
 runvenv/
 
+# Local dependency drop (pip --target)
+.deps/
+.deps-*/
+.npm-cache/
+.gitconfig_codex
+
+# Local secrets
+.env
+.env.*
+
 # Node / React
 node_modules/
 dist/
@@ -23,6 +33,7 @@ backend/data/*.db
 backend/data/chroma/
 backend/data/st_cache/
 backend/data/vector_fallback.json
+logs/
 *.log
 
 # OS / editor

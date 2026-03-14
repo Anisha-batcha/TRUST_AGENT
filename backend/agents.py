@@ -36,9 +36,12 @@ def run_agent_pipeline(
         metrics = scraped.metrics
         collector_meta["mode"] = scraped.mode
         collector_meta["source_url"] = scraped.source_url
-        collector_meta["notes"].append("Live page signals extracted via Selenium")
-        if scraped.mode == "http_fallback":
+        if scraped.mode == "selenium":
+            collector_meta["notes"].append("Live page signals extracted via Selenium")
+        elif scraped.mode in {"http_fallback", "http_fallback_thin"}:
             collector_meta["notes"].append("Static HTTP fallback was used due to Selenium limitations")
+        elif scraped.mode == "serper_fallback":
+            collector_meta["notes"].append("Search-snippet fallback was used due to scraping limitations")
         context_text = scraped.raw_text
     except ScrapeError as exc:
         metrics = fallback_metrics_fn(target, category)
@@ -62,9 +65,12 @@ def run_agent_pipeline(
         scored["data_state"] = "limited_data"
         scored["confidence_score"] = round(max(0.25, float(scored["confidence_score"]) - 0.15), 3)
         verifier_meta["actions"].append("Confidence reduced because scraping fallback was used")
-    elif collector_meta["mode"] == "http_fallback":
+    elif collector_meta["mode"] in {"http_fallback", "http_fallback_thin"}:
         scored["confidence_score"] = round(max(0.25, float(scored["confidence_score"]) - 0.07), 3)
         verifier_meta["actions"].append("Confidence slightly reduced because static fallback mode was used")
+        if collector_meta["mode"] == "http_fallback_thin":
+            scored["data_state"] = "limited_data"
+            verifier_meta["actions"].append("Limited content was available from the target website")
 
     pipeline = {
         "collector": collector_meta,
